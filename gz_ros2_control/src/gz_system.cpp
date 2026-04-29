@@ -847,9 +847,11 @@ hardware_interface::return_type GazeboSimSystem::write(
       this->dataPtr->joints_[mimic_joint.joint_index].sim_joint)->Data()[0];
 
     double position_error =
-      position_mimic_joint - position_mimicked_joint * mimic_joint.multiplier;
+      position_mimic_joint -
+      (position_mimicked_joint * mimic_joint.multiplier + mimic_joint.offset);
 
-    double velocity_sp = (-1.0) * position_error * this->dataPtr->update_rate;
+    double velocity_sp = (-1.0) * position_error *
+      this->dataPtr->position_proportional_gain_ * this->dataPtr->update_rate;
 
     auto vel =
       this->dataPtr->ecm->Component<sim::components::JointVelocityCmd>(
