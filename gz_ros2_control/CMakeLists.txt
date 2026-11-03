@@ -12,7 +12,7 @@ endif()
 
 # Find dependencies
 find_package(ament_cmake REQUIRED)
-find_package(controller_manager REQUIRED)
+find_package(hector_controller_manager REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -36,7 +36,7 @@ target_link_libraries(${PROJECT_NAME}-system
   PUBLIC
   gz-sim::gz-sim
   gz-plugin::register
-  controller_manager::controller_manager
+  hector_controller_manager::hector_controller_manager
   hardware_interface::hardware_interface
   ${pluginlib_TARGETS}
   rclcpp::rclcpp
@@ -96,7 +96,7 @@ ament_export_targets(
 )
 
 ament_export_dependencies(
-    controller_manager
+    hector_controller_manager
     hardware_interface
 )
 

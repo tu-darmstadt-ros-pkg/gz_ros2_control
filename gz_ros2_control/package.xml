@@ -17,7 +17,7 @@
   <depend>yaml_cpp_vendor</depend>
   <depend>rclcpp_lifecycle</depend>
 
-  <depend>controller_manager</depend>
+  <depend>hector_controller_manager</depend>
   <depend>hardware_interface</depend>
   <depend>ros2_control_cmake</depend>
 

@@ -30,9 +30,8 @@
 #include <gz/plugin/Register.hh>
 
 
-#include <controller_manager/controller_manager.hpp>
+#include <hector_controller_manager/controller_manager.hpp>
 
-#include <hardware_interface/resource_manager.hpp>
 #include <hardware_interface/component_parser.hpp>
 #include <hardware_interface/types/hardware_interface_type_values.hpp>
 
@@ -45,94 +44,6 @@
 
 namespace gz_ros2_control
 {
-class GZResourceManager : public hardware_interface::ResourceManager
-{
-public:
-  GZResourceManager(
-    rclcpp::Node::SharedPtr & node,
-    sim::EntityComponentManager & ecm,
-    std::map<std::string, sim::Entity> enabledJoints)
-  : hardware_interface::ResourceManager(
-      node->get_node_clock_interface(), node->get_node_logging_interface()),
-    gz_system_loader_("gz_ros2_control", "gz_ros2_control::GazeboSimSystemInterface"),
-    logger_(node->get_logger().get_child("GZResourceManager"))
-  {
-    node_ = node;
-    ecm_ = &ecm;
-    enabledJoints_ = enabledJoints;
-  }
-
-  GZResourceManager(const GZResourceManager &) = delete;
-
-  // Called from Controller Manager when robot description is initialized from callback
-  bool load_and_initialize_components(
-    const hardware_interface::ResourceManagerParams & params) override
-  {
-    components_are_loaded_and_initialized_ = true;
-
-    const auto hardware_info =
-      hardware_interface::parse_control_resources_from_urdf(params.robot_description);
-
-    for (const auto & individual_hardware_info : hardware_info) {
-      std::string robot_hw_sim_type_str_ = individual_hardware_info.hardware_plugin_name;
-      RCLCPP_DEBUG(
-        logger_, "Load hardware interface %s ...",
-        robot_hw_sim_type_str_.c_str());
-
-      // Load hardware
-      std::unique_ptr<gz_ros2_control::GazeboSimSystemInterface> gzSimSystem;
-      std::scoped_lock guard(resource_interfaces_lock_, claimed_command_interfaces_lock_);
-      try {
-        gzSimSystem = std::unique_ptr<gz_ros2_control::GazeboSimSystemInterface>(
-          gz_system_loader_.createUnmanagedInstance(robot_hw_sim_type_str_));
-      } catch (pluginlib::PluginlibException & ex) {
-        RCLCPP_ERROR(
-          logger_,
-          "The plugin failed to load for some reason. Error: %s\n",
-          ex.what());
-        continue;
-      }
-
-      // initialize simulation requirements
-      if (!gzSimSystem->initSim(
-          node_,
-          enabledJoints_,
-          individual_hardware_info,
-          *ecm_,
-          params.update_rate))
-      {
-        RCLCPP_FATAL(
-          logger_, "Could not initialize robot simulation interface");
-        components_are_loaded_and_initialized_ = false;
-        break;
-      }
-      RCLCPP_DEBUG(
-        logger_, "Initialized robot simulation interface %s!",
-        robot_hw_sim_type_str_.c_str());
-
-      hardware_interface::HardwareComponentParams component_params;
-      component_params.hardware_info = individual_hardware_info;
-      component_params.executor = params.executor;
-      component_params.clock = params.clock;
-      component_params.logger = params.logger;
-      // initialize hardware
-      import_component(std::move(gzSimSystem), component_params);
-    }
-
-    return components_are_loaded_and_initialized_;
-  }
-
-private:
-  std::shared_ptr<rclcpp::Node> node_;
-  sim::EntityComponentManager * ecm_;
-  std::map<std::string, sim::Entity> enabledJoints_;
-
-  /// \brief Interface loader
-  pluginlib::ClassLoader<gz_ros2_control::GazeboSimSystemInterface> gz_system_loader_;
-
-  rclcpp::Logger logger_;
-};
-
 //////////////////////////////////////////////////
 class GazeboSimROS2ControlPluginPrivate
 {
@@ -164,8 +75,12 @@ public:
   rclcpp::Duration control_period_ = rclcpp::Duration(1, 0);
 
   /// \brief Controller manager
-  std::shared_ptr<controller_manager::ControllerManager>
+  std::shared_ptr<hector_controller_manager::ControllerManager>
   controller_manager_{nullptr};
+
+  /// \brief Loads the gz system plugins the controller manager runs as hardware
+  std::unique_ptr<pluginlib::ClassLoader<gz_ros2_control::GazeboSimSystemInterface>>
+  gz_system_loader_;
 
   /// \brief Last time the update method was called
   rclcpp::Time last_update_sim_time_ros_ =
@@ -433,12 +348,29 @@ void GazeboSimROS2ControlPlugin::Configure(
       e.what());
   }
 
-  std::unique_ptr<hardware_interface::ResourceManager> resource_manager_ =
-    std::make_unique<gz_ros2_control::GZResourceManager>(this->dataPtr->node_, _ecm, enabledJoints);
+  this->dataPtr->ecm = &_ecm;
+  this->dataPtr->gz_system_loader_ =
+    std::make_unique<pluginlib::ClassLoader<gz_ros2_control::GazeboSimSystemInterface>>(
+    "gz_ros2_control", "gz_ros2_control::GazeboSimSystemInterface");
+  // The controller manager calls this on a hardware owner thread when it loads the description
+  auto hardware_factory =
+    [this, enabledJoints](const hardware_interface::HardwareInfo & info) mutable
+    -> std::unique_ptr<hardware_interface::HardwareComponentInterface>
+    {
+      std::unique_ptr<gz_ros2_control::GazeboSimSystemInterface> system(
+        this->dataPtr->gz_system_loader_->createUnmanagedInstance(info.hardware_plugin_name));
+      if (!system->initSim(
+          this->dataPtr->node_, enabledJoints, info, *this->dataPtr->ecm,
+          static_cast<int>(this->dataPtr->controller_manager_->get_update_rate())))
+      {
+        throw std::runtime_error("Could not initialize the simulation of '" + info.name + "'");
+      }
+      return system;
+    };
 
   // Create the controller manager
-  RCLCPP_INFO(this->dataPtr->node_->get_logger(), "Loading controller_manager");
-  rclcpp::NodeOptions options = controller_manager::get_cm_node_options();
+  RCLCPP_INFO(this->dataPtr->node_->get_logger(), "Loading hector_controller_manager");
+  rclcpp::NodeOptions options = hector_controller_manager::get_cm_node_options();
   arguments.push_back("-r");
   arguments.push_back("__node:=" + controllerManagerNodeName);
   arguments.push_back("-r");
@@ -447,12 +379,10 @@ void GazeboSimROS2ControlPlugin::Configure(
   arguments.push_back("-p");
   arguments.push_back("use_sim_time:=true");
   options.arguments(arguments);
-  this->dataPtr->controller_manager_.reset(
-    new controller_manager::ControllerManager(
-      std::move(resource_manager_),
-      this->dataPtr->executor_,
-      controllerManagerNodeName,
-      this->dataPtr->node_->get_namespace(), options));
+  this->dataPtr->controller_manager_ =
+    std::make_shared<hector_controller_manager::ControllerManager>(
+    this->dataPtr->executor_, controllerManagerNodeName, this->dataPtr->node_->get_namespace(),
+    options, hardware_factory);
   this->dataPtr->executor_->add_node(this->dataPtr->controller_manager_);
 
   this->dataPtr->update_rate =
@@ -462,7 +392,7 @@ void GazeboSimROS2ControlPlugin::Configure(
       std::chrono::duration<double>(1.0 / static_cast<double>(this->dataPtr->update_rate))));
 
   // Wait for CM to receive robot description from the topic and then initialize Resource Manager
-  while (!this->dataPtr->controller_manager_->is_resource_manager_initialized()) {
+  while (!this->dataPtr->controller_manager_->is_initialized()) {
     RCLCPP_WARN(
       this->dataPtr->node_->get_logger(),
       "Waiting RM to load and initialize hardware...");
