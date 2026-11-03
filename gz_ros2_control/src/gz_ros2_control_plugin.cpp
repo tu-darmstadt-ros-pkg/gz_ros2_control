@@ -352,7 +352,10 @@ void GazeboSimROS2ControlPlugin::Configure(
   this->dataPtr->gz_system_loader_ =
     std::make_unique<pluginlib::ClassLoader<gz_ros2_control::GazeboSimSystemInterface>>(
     "gz_ros2_control", "gz_ros2_control::GazeboSimSystemInterface");
-  // The controller manager calls this on a hardware owner thread when it loads the description
+  // The controller manager calls this on a hardware owner thread when it loads the description.
+  // initSim uses the ECM from that thread, which is safe only because Configure blocks below until
+  // the controller manager is initialized, so gz runs no physics meanwhile. prepare and perform of
+  // the gz systems do not touch the ECM.
   auto hardware_factory =
     [this, enabledJoints](const hardware_interface::HardwareInfo & info) mutable
     -> std::unique_ptr<hardware_interface::HardwareComponentInterface>
