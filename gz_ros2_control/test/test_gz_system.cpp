@@ -205,3 +205,10 @@ TEST_F(GazeboSimSystemTest, NanEffortKeepsTheLastEffort)
   step();
   EXPECT_EQ(effort_cmd("effort_joint"), 3.0);
 }
+
+TEST_F(GazeboSimSystemTest, MimicJointFollowsAtTheUpdateRate)
+{
+  set_position("position_joint", 0.5);
+  step();
+  EXPECT_NEAR(velocity_cmd("mimic_joint"), 1.0 * kUpdateRate, 1e-9);
+}
