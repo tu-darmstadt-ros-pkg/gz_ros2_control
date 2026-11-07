@@ -193,6 +193,20 @@ TEST_F(GazeboSimSystemTest, NanPositionHoldsThePositionLatchedAtTheFirstNan)
   EXPECT_EQ(velocity_cmd("position_joint"), 0.0);
 }
 
+TEST_F(GazeboSimSystemTest, LeavingPositionModeDropsTheLatchedPosition)
+{
+  set_position("position_joint", 1.0);
+  command("position_joint/position", kNaN);
+  step();
+
+  ASSERT_EQ(system_.perform_command_mode_switch({}, {"position_joint/position"}), return_type::OK);
+  step();
+  set_position("position_joint", 1.5);
+  ASSERT_EQ(system_.perform_command_mode_switch({"position_joint/position"}, {}), return_type::OK);
+  step();
+  EXPECT_EQ(velocity_cmd("position_joint"), 0.0);
+}
+
 TEST_F(GazeboSimSystemTest, NanEffortKeepsTheLastEffort)
 {
   command("effort_joint/effort", kNaN);
