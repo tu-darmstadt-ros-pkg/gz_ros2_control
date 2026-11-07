@@ -212,3 +212,21 @@ TEST_F(GazeboSimSystemTest, MimicJointFollowsAtTheUpdateRate)
   step();
   EXPECT_NEAR(velocity_cmd("mimic_joint"), 1.0 * kUpdateRate, 1e-9);
 }
+
+TEST_F(GazeboSimSystemTest, LeavingActiveStopsApplyingTheLastEffort)
+{
+  using Callback = gz_ros2_control::CallbackReturn (gz_ros2_control::GazeboSimSystem::*)(
+    const rclcpp_lifecycle::State &);
+  for (const Callback exit : {&gz_ros2_control::GazeboSimSystem::on_deactivate,
+      &gz_ros2_control::GazeboSimSystem::on_error, &gz_ros2_control::GazeboSimSystem::on_shutdown})
+  {
+    command("effort_joint/effort", 3.0);
+    step();
+    (system_.*exit)(rclcpp_lifecycle::State());
+    // gz physics zeroes the force after every step
+    ecm_.SetComponentData<components::JointForceCmd>(entities_.at("effort_joint"), {0.0});
+    system_.applyCommands(ecm_);
+    EXPECT_EQ(effort_cmd("effort_joint"), 0.0);
+    EXPECT_EQ(velocity_cmd("effort_joint"), 0.0);
+  }
+}

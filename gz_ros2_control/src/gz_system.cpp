@@ -257,6 +257,24 @@ public:
 
   /// \brief Guards sim_command, which write() and applyCommands() access from different threads
   std::mutex sim_command_mutex_;
+
+  /// \brief Command of a joint that no interface commands
+  SimCommand idle_command(const jointData & joint) const
+  {
+    if (joint.is_actuated && hold_joints_) {
+      return {SimCommand::Type::VELOCITY, 0.0};
+    }
+    return {};
+  }
+
+  /// \brief Stops applying the last write once the component no longer writes
+  void stop_commands()
+  {
+    std::lock_guard<std::mutex> lock(sim_command_mutex_);
+    for (auto & joint : joints_) {
+      joint.sim_command = idle_command(joint);
+    }
+  }
 };
 
 namespace gz_ros2_control
@@ -706,7 +724,20 @@ CallbackReturn GazeboSimSystem::on_activate(const rclcpp_lifecycle::State & prev
 
 CallbackReturn GazeboSimSystem::on_deactivate(const rclcpp_lifecycle::State & previous_state)
 {
+  this->dataPtr->stop_commands();
   return hardware_interface::SystemInterface::on_deactivate(previous_state);
+}
+
+CallbackReturn GazeboSimSystem::on_error(const rclcpp_lifecycle::State & previous_state)
+{
+  this->dataPtr->stop_commands();
+  return hardware_interface::SystemInterface::on_error(previous_state);
+}
+
+CallbackReturn GazeboSimSystem::on_shutdown(const rclcpp_lifecycle::State & previous_state)
+{
+  this->dataPtr->stop_commands();
+  return hardware_interface::SystemInterface::on_shutdown(previous_state);
 }
 
 hardware_interface::return_type GazeboSimSystem::read(
@@ -890,11 +921,8 @@ hardware_interface::return_type GazeboSimSystem::write(
           joint.sim_command = {Type::EFFORT, 0.0};
         }
       }
-    } else if (joint.is_actuated && this->dataPtr->hold_joints_) {
-      // Fallback case is a velocity command of zero (only for actuated joints)
-      joint.sim_command = {Type::VELOCITY, 0.0};
     } else {
-      joint.sim_command = {};
+      joint.sim_command = this->dataPtr->idle_command(joint);
     }
   }
 

@@ -62,6 +62,12 @@ public:
   CallbackReturn on_deactivate(const rclcpp_lifecycle::State & previous_state) override;
 
   // Documentation Inherited
+  CallbackReturn on_error(const rclcpp_lifecycle::State & previous_state) override;
+
+  // Documentation Inherited
+  CallbackReturn on_shutdown(const rclcpp_lifecycle::State & previous_state) override;
+
+  // Documentation Inherited
   hardware_interface::return_type perform_command_mode_switch(
     const std::vector<std::string> & start_interfaces,
     const std::vector<std::string> & stop_interfaces) override;
