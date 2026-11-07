@@ -84,6 +84,10 @@ install(EXPORT export_${PROJECT_NAME}
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_gz_system test/test_gz_system.cpp)
+  target_link_libraries(test_gz_system gz_hardware_plugins)
 endif()
 
 # Export old-style CMake variables

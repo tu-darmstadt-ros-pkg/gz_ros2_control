@@ -18,10 +18,13 @@
 #include <gz/msgs/wrench.pb.h>
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -67,6 +70,13 @@ struct InterfaceData
   hardware_interface::CommandInterface::SharedPtr command;
 };
 
+struct SimCommand
+{
+  enum class Type {NONE, VELOCITY, EFFORT};
+  Type type{Type::NONE};
+  double value{0.0};
+};
+
 struct jointData
 {
   /// \brief Joint's names.
@@ -95,6 +105,12 @@ struct jointData
 
   /// \brief Control method defined in the URDF for each joint.
   gz_ros2_control::GazeboSimSystemInterface::ControlMethod joint_control_method;
+
+  /// \brief Command computed by write() and applied to gz by applyCommands()
+  SimCommand sim_command;
+
+  /// \brief Position latched at the first NaN position command, held until a valid one
+  std::optional<double> position_hold;
 
   /// \brief Precomputed interface names ("joint_name/position" etc.) to avoid
   /// per-call string allocations in perform_command_mode_switch.
@@ -238,10 +254,17 @@ public:
 
   // Should hold the joints if no control_mode is active
   bool hold_joints_ = true;
+
+  /// \brief Guards sim_command, which write() and applyCommands() access from different threads
+  std::mutex sim_command_mutex_;
 };
 
 namespace gz_ros2_control
 {
+
+GazeboSimSystem::GazeboSimSystem() = default;
+
+GazeboSimSystem::~GazeboSimSystem() = default;
 
 bool GazeboSimSystem::initSim(
   rclcpp::Node::SharedPtr & model_nh,
@@ -820,69 +843,78 @@ hardware_interface::return_type GazeboSimSystem::write(
   const rclcpp::Time & /*time*/,
   const rclcpp::Duration & /*period*/)
 {
-  for (unsigned int i = 0; i < this->dataPtr->joints_.size(); ++i) {
-    if (this->dataPtr->joints_[i].sim_joint == sim::kNullEntity) {
+  using Type = SimCommand::Type;
+  // NaN means no target, so a joint holds like on the real Dynamixel hardware
+  const auto velocity_or_zero = [](double velocity) {
+      return std::isfinite(velocity) ? velocity : 0.0;
+    };
+
+  std::lock_guard<std::mutex> lock(this->dataPtr->sim_command_mutex_);
+  for (auto & joint : this->dataPtr->joints_) {
+    if (joint.sim_joint == sim::kNullEntity) {
       continue;
     }
+    const bool position_mode =
+      !(joint.joint_control_method & VELOCITY) && (joint.joint_control_method & POSITION);
+    if (!position_mode) {
+      joint.position_hold.reset();
+    }
 
-    if (this->dataPtr->joints_[i].joint_control_method & VELOCITY) {
+    if (joint.joint_control_method & VELOCITY) {
       double velocity_cmd = 0.0;
-      if (this->dataPtr->joints_[i].velocity.command->get_value(velocity_cmd, true)) {
-        this->dataPtr->ecm->SetComponentData<sim::components::JointVelocityCmd>(
-          this->dataPtr->joints_[i].sim_joint,
-          {velocity_cmd});
+      if (joint.velocity.command->get_value(velocity_cmd, true)) {
+        joint.sim_command = {Type::VELOCITY, velocity_or_zero(velocity_cmd)};
       }
-    } else if (this->dataPtr->joints_[i].joint_control_method & POSITION) {
-      // Get error in position
+    } else if (position_mode) {
       double position_cmd = 0.0;
-      if (this->dataPtr->joints_[i].position.command->get_value(position_cmd, true)) {
-        double error = (this->dataPtr->joints_[i].position.state_value - position_cmd) *
+      if (joint.position.command->get_value(position_cmd, true)) {
+        if (std::isfinite(position_cmd)) {
+          joint.position_hold.reset();
+        } else {
+          if (!joint.position_hold) {
+            joint.position_hold = joint.position.state_value;
+          }
+          position_cmd = *joint.position_hold;
+        }
+        const double error = (joint.position.state_value - position_cmd) *
           this->dataPtr->update_rate;
-
-        // Calculate target velcity
-        double target_vel = -this->dataPtr->position_proportional_gain_ * error;
-
-        auto vel =
-          this->dataPtr->ecm->Component<sim::components::JointVelocityCmd>(
-          this->dataPtr->joints_[i].sim_joint);
-
-        if (vel == nullptr) {
-          this->dataPtr->ecm->CreateComponent(
-            this->dataPtr->joints_[i].sim_joint,
-            sim::components::JointVelocityCmd({target_vel}));
-        } else if (!vel->Data().empty()) {
-          vel->Data()[0] = target_vel;
+        joint.sim_command = {Type::VELOCITY,
+          velocity_or_zero(-this->dataPtr->position_proportional_gain_ * error)};
+      }
+    } else if (joint.joint_control_method & EFFORT) {
+      double effort_cmd = 0.0;
+      if (joint.effort.command->get_value(effort_cmd, true)) {
+        if (std::isfinite(effort_cmd)) {
+          joint.sim_command = {Type::EFFORT, effort_cmd};
+        } else if (joint.sim_command.type != Type::EFFORT) {
+          joint.sim_command = {Type::EFFORT, 0.0};
         }
       }
-    } else if (this->dataPtr->joints_[i].joint_control_method & EFFORT) {
-      if (!this->dataPtr->ecm->Component<sim::components::JointForceCmd>(
-          this->dataPtr->joints_[i].sim_joint))
-      {
-        this->dataPtr->ecm->CreateComponent(
-          this->dataPtr->joints_[i].sim_joint,
-          sim::components::JointForceCmd({0}));
-      } else {
-        double effort_cmd = 0.0;
-        if (this->dataPtr->joints_[i].effort.command->get_value(effort_cmd, true)) {
-          const auto jointEffortCmd =
-            this->dataPtr->ecm->Component<sim::components::JointForceCmd>(
-            this->dataPtr->joints_[i].sim_joint);
-          *jointEffortCmd = sim::components::JointForceCmd({effort_cmd});
-        }
-      }
-    } else if (this->dataPtr->joints_[i].is_actuated && this->dataPtr->hold_joints_) {
+    } else if (joint.is_actuated && this->dataPtr->hold_joints_) {
       // Fallback case is a velocity command of zero (only for actuated joints)
-      double target_vel = 0.0;
-      auto vel =
-        this->dataPtr->ecm->Component<sim::components::JointVelocityCmd>(
-        this->dataPtr->joints_[i].sim_joint);
+      joint.sim_command = {Type::VELOCITY, 0.0};
+    } else {
+      joint.sim_command = {};
+    }
+  }
 
-      if (vel == nullptr) {
-        this->dataPtr->ecm->CreateComponent(
-          this->dataPtr->joints_[i].sim_joint,
-          sim::components::JointVelocityCmd({target_vel}));
-      } else if (!vel->Data().empty()) {
-        vel->Data()[0] = target_vel;
+  return hardware_interface::return_type::OK;
+}
+
+void GazeboSimSystem::applyCommands(sim::EntityComponentManager & _ecm)
+{
+  {
+    std::lock_guard<std::mutex> lock(this->dataPtr->sim_command_mutex_);
+    for (const auto & joint : this->dataPtr->joints_) {
+      if (joint.sim_joint == sim::kNullEntity) {
+        continue;
+      }
+      if (joint.sim_command.type == SimCommand::Type::VELOCITY) {
+        _ecm.SetComponentData<sim::components::JointVelocityCmd>(
+          joint.sim_joint, {joint.sim_command.value});
+      } else if (joint.sim_command.type == SimCommand::Type::EFFORT) {
+        _ecm.SetComponentData<sim::components::JointForceCmd>(
+          joint.sim_joint, {joint.sim_command.value});
       }
     }
   }
@@ -891,11 +923,11 @@ hardware_interface::return_type GazeboSimSystem::write(
   for (const auto & mimic_joint : this->info_.mimic_joints) {
     // Get the joint position
     double position_mimicked_joint =
-      this->dataPtr->ecm->Component<sim::components::JointPosition>(
+      _ecm.Component<sim::components::JointPosition>(
       this->dataPtr->joints_[mimic_joint.mimicked_joint_index].sim_joint)->Data()[0];
 
     double position_mimic_joint =
-      this->dataPtr->ecm->Component<sim::components::JointPosition>(
+      _ecm.Component<sim::components::JointPosition>(
       this->dataPtr->joints_[mimic_joint.joint_index].sim_joint)->Data()[0];
 
     double position_error =
@@ -905,20 +937,9 @@ hardware_interface::return_type GazeboSimSystem::write(
     double velocity_sp = (-1.0) * position_error *
       this->dataPtr->position_proportional_gain_ * this->dataPtr->update_rate;
 
-    auto vel =
-      this->dataPtr->ecm->Component<sim::components::JointVelocityCmd>(
-      this->dataPtr->joints_[mimic_joint.joint_index].sim_joint);
-
-    if (vel == nullptr) {
-      this->dataPtr->ecm->CreateComponent(
-        this->dataPtr->joints_[mimic_joint.joint_index].sim_joint,
-        sim::components::JointVelocityCmd({velocity_sp}));
-    } else if (!vel->Data().empty()) {
-      vel->Data()[0] = velocity_sp;
-    }
+    _ecm.SetComponentData<sim::components::JointVelocityCmd>(
+      this->dataPtr->joints_[mimic_joint.joint_index].sim_joint, {velocity_sp});
   }
-
-  return hardware_interface::return_type::OK;
 }
 }  // namespace gz_ros2_control
 

@@ -82,6 +82,9 @@ public:
   std::unique_ptr<pluginlib::ClassLoader<gz_ros2_control::GazeboSimSystemInterface>>
   gz_system_loader_;
 
+  /// \brief The gz systems, owned by the controller manager
+  std::vector<gz_ros2_control::GazeboSimSystemInterface *> systems_;
+
   /// \brief Last time the update method was called
   rclcpp::Time last_update_sim_time_ros_ =
     rclcpp::Time(static_cast<int64_t>(0), RCL_ROS_TIME);
@@ -354,8 +357,8 @@ void GazeboSimROS2ControlPlugin::Configure(
     "gz_ros2_control", "gz_ros2_control::GazeboSimSystemInterface");
   // The controller manager calls this on a hardware owner thread when it loads the description.
   // initSim uses the ECM from that thread, which is safe only because Configure blocks below until
-  // the controller manager is initialized, so gz runs no physics meanwhile. prepare and perform of
-  // the gz systems do not touch the ECM.
+  // the controller manager is initialized, so gz runs no physics meanwhile. Later only
+  // applyCommands touches the ECM, on the gz thread.
   auto hardware_factory =
     [this, enabledJoints](const hardware_interface::HardwareInfo & info) mutable
     -> std::unique_ptr<hardware_interface::HardwareComponentInterface>
@@ -368,6 +371,7 @@ void GazeboSimROS2ControlPlugin::Configure(
       {
         throw std::runtime_error("Could not initialize the simulation of '" + info.name + "'");
       }
+      this->dataPtr->systems_.push_back(system.get());
       return system;
     };
 
@@ -408,7 +412,7 @@ void GazeboSimROS2ControlPlugin::Configure(
 //////////////////////////////////////////////////
 void GazeboSimROS2ControlPlugin::PreUpdate(
   const sim::UpdateInfo & _info,
-  sim::EntityComponentManager & /*_ecm*/)
+  sim::EntityComponentManager & _ecm)
 {
   if (!this->dataPtr->controller_manager_) {
     return;
@@ -439,6 +443,9 @@ void GazeboSimROS2ControlPlugin::PreUpdate(
   // Always set commands on joints, otherwise at low control frequencies the joints tremble
   // as they are updated at a fraction of gazebo sim time
   this->dataPtr->controller_manager_->write(sim_time_ros, sim_period);
+  for (auto * system : this->dataPtr->systems_) {
+    system->applyCommands(_ecm);
+  }
 }
 
 //////////////////////////////////////////////////

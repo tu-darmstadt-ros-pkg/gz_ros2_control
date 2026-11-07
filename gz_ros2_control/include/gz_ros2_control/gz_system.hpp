@@ -38,6 +38,9 @@ class GazeboSimSystemPrivate;
 class GazeboSimSystem : public GazeboSimSystemInterface
 {
 public:
+  GazeboSimSystem();
+  ~GazeboSimSystem() override;
+
   // Documentation Inherited
   CallbackReturn on_init(const hardware_interface::HardwareComponentInterfaceParams & params)
   override;
@@ -80,6 +83,9 @@ public:
     const hardware_interface::HardwareInfo & hardware_info,
     sim::EntityComponentManager & _ecm,
     unsigned int update_rate) override;
+
+  // Documentation Inherited
+  void applyCommands(sim::EntityComponentManager & _ecm) override;
 
 private:
   // Register a sensor (for now just IMUs)
