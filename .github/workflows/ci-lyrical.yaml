@@ -32,6 +32,8 @@ jobs:
       image: ghcr.io/ros-controls/ros:${{ matrix.ros-distro }}-ubuntu${{ matrix.ros-repo-packages }}
     steps:
     - uses: actions/checkout@v6
+    - name: Checkout hector_controller_manager
+      run: vcs import --input hector.lyrical.repos
     - name: Checkout ros2_control framework for semi-binary builds
       if: ${{ matrix.upstream-repos != '' }}
       run: vcs import --input ${{ matrix.upstream-repos }}
@@ -41,15 +43,19 @@ jobs:
       run: |
         apt-get update
         rosdep update
-        rosdep install --from-paths ./ -i -y --rosdistro ${ROS_DISTRO}
+        # cm_test_suite is only a test dependency of hector_controller_manager, whose tests are not run here
+        rosdep install --from-paths ./ -i -y --rosdistro ${ROS_DISTRO} --skip-keys cm_test_suite
     - name: Build project
       id: build
       run: |
         . /opt/ros/${ROS_DISTRO}/local_setup.sh
-        colcon build --packages-up-to gz_ros2_control_demos gz_ros2_control_tests
+        colcon build --packages-up-to hector_controller_manager --cmake-args -DBUILD_TESTING=OFF
+        colcon build --packages-up-to gz_ros2_control_demos gz_ros2_control_tests --packages-skip-build-finished
     - name: Run tests
       id: test
       run: |
         . /opt/ros/${ROS_DISTRO}/local_setup.sh
+        # The tests must load this build's gz plugin, also if a binary gz_ros2_control is installed
+        . install/local_setup.sh
         colcon test --event-handlers console_direct+ --packages-select gz_ros2_control gz_ros2_control_demos gz_ros2_control_tests
         colcon test-result

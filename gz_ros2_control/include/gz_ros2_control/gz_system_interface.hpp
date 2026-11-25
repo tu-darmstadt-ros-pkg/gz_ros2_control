@@ -90,6 +90,13 @@ public:
     sim::EntityComponentManager & _ecm,
     unsigned int update_rate) = 0;
 
+  /// \brief Apply the commands of the last write() to the simulation
+  /// The plugin calls this on the gz thread before every physics step. hector_controller_manager
+  /// may call write() from another thread while physics runs, so only this method may write the
+  /// ECM.
+  /// param[in] _ecm Entity-component manager.
+  virtual void applyCommands(sim::EntityComponentManager & /*_ecm*/) {}
+
   // Methods used to control a joint.
   enum ControlMethod_
   {
